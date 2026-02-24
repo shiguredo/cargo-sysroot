@@ -16,7 +16,7 @@ checksum = "a86b88848c0847cfa64a48ad5c776ed2dbb0cc8fe1241ab20939a101ff7e1465"
 
 [[package]]
 name = "shiguredo_sysroot"
-version = "2026.0.0"
+version = "2026.1.0-canary.0"
 dependencies = [
  "noargs",
  "nojson",
