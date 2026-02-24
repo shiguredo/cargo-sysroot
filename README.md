@@ -51,6 +51,10 @@ JSON 形式の設定ファイルを作成します。
   "arch": "arm64",
   "rust_target": "aarch64-unknown-linux-gnu",
   "linker": "aarch64-linux-gnu-gcc",
+  "cc": "aarch64-linux-gnu-gcc",
+  "cxx": "aarch64-linux-gnu-g++",
+  "cflags": ["-isystem", "$SYSROOT/usr/include/aarch64-linux-gnu", "-isystem", "$SYSROOT/usr/include"],
+  "cxxflags": [],
   "packages": [
     "libc6-dev",
     "libstdc++-13-dev"
@@ -71,6 +75,10 @@ JSON 形式の設定ファイルを作成します。
 | `arch` | APT アーキテクチャ名 (例: `arm64`, `armhf`, `riscv64`) |
 | `rust_target` | Rust のターゲットトリプル |
 | `linker` | クロスコンパイラのリンカ |
+| `cc` | C コンパイラ |
+| `cxx` | C++ コンパイラ |
+| `cflags` | C コンパイラに追加するフラグ配列 (`$SYSROOT` はラッパー実行時の sysroot 絶対パスとして展開) |
+| `cxxflags` | C++ コンパイラに追加するフラグ配列 (`$SYSROOT` はラッパー実行時の sysroot 絶対パスとして展開) |
 | `packages` | インストールするパッケージ一覧 |
 | `repos` | APT リポジトリの定義 (url, suites, components) |
 
@@ -82,6 +90,10 @@ Raspberry Pi OS (trixie) 向けの例です。Debian ベースのリポジトリ
   "arch": "arm64",
   "rust_target": "aarch64-unknown-linux-gnu",
   "linker": "aarch64-linux-gnu-gcc",
+  "cc": "aarch64-linux-gnu-gcc",
+  "cxx": "aarch64-linux-gnu-g++",
+  "cflags": ["-isystem", "$SYSROOT/usr/include/aarch64-linux-gnu", "-isystem", "$SYSROOT/usr/include"],
+  "cxxflags": [],
   "packages": [
     "libc6-dev",
     "libstdc++-14-dev"
