@@ -1,5 +1,7 @@
 # cargo-sysroot
 
+[![shiguredo_sysroot](https://img.shields.io/crates/v/shiguredo_sysroot.svg)](https://crates.io/crates/shiguredo_sysroot)
+[![Documentation](https://docs.rs/shiguredo_sysroot/badge.svg)](https://docs.rs/shiguredo_sysroot)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ## About Shiguredo's open source software
