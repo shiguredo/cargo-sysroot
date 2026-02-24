@@ -67,6 +67,10 @@ struct SysrootConfig {
     arch: String,
     rust_target: String,
     linker: String,
+    cc: String,
+    cxx: String,
+    cflags: Vec<String>,
+    cxxflags: Vec<String>,
     packages: Vec<String>,
     repos: Vec<RepoSpec>,
 }
@@ -103,6 +107,10 @@ impl<'text, 'raw> TryFrom<nojson::RawJsonValue<'text, 'raw>> for SysrootConfig {
         let arch = required_non_empty_string_member(value, "arch", "arch")?;
         let rust_target = required_non_empty_string_member(value, "rust_target", "rust_target")?;
         let linker = required_non_empty_string_member(value, "linker", "linker")?;
+        let cc = required_non_empty_string_member(value, "cc", "cc")?;
+        let cxx = required_non_empty_string_member(value, "cxx", "cxx")?;
+        let cflags = required_string_array_member(value, "cflags", "cflags")?;
+        let cxxflags = required_string_array_member(value, "cxxflags", "cxxflags")?;
 
         let packages = required_non_empty_string_array_member(value, "packages", "packages")?;
 
@@ -120,6 +128,10 @@ impl<'text, 'raw> TryFrom<nojson::RawJsonValue<'text, 'raw>> for SysrootConfig {
             arch,
             rust_target,
             linker,
+            cc,
+            cxx,
+            cflags,
+            cxxflags,
             packages,
             repos,
         })
@@ -163,6 +175,7 @@ fn run() -> Result<()> {
     let bundle_dir = target_dir.join("shiguredo-sysroot").join(&config.name);
     let sysroot_dir = bundle_dir.join("sysroot");
     let workbase = bundle_dir.join("work");
+    let bin_dir = bundle_dir.join("bin");
 
     build_sysroot(&config, &config.arch, &sysroot_dir, &workbase)?;
 
@@ -170,9 +183,13 @@ fn run() -> Result<()> {
     update_cargo_config(
         &cwd,
         &sysroot_dir,
+        &bin_dir,
         &config.rust_target,
         &config.linker,
-        &config.arch,
+        &config.cc,
+        &config.cxx,
+        &config.cflags,
+        &config.cxxflags,
     )?;
 
     println!("Done.");
@@ -265,12 +282,21 @@ fn required_non_empty_string_array_member(
     key: &str,
     label: &str,
 ) -> JsonResult<Vec<String>> {
-    let member = value.to_member(key)?.required()?;
-    let items = parse_string_array(member, label)?;
+    let items = required_string_array_member(value, key, label)?;
     if items.is_empty() {
+        let member = value.to_member(key)?.required()?;
         return Err(member.invalid(format!("{label} が空です")));
     }
     Ok(items)
+}
+
+fn required_string_array_member(
+    value: nojson::RawJsonValue<'_, '_>,
+    key: &str,
+    label: &str,
+) -> JsonResult<Vec<String>> {
+    let member = value.to_member(key)?.required()?;
+    parse_string_array(member, label)
 }
 
 fn validate_name(value: nojson::RawJsonValue<'_, '_>, name: &str) -> JsonResult<()> {
@@ -584,13 +610,17 @@ fn absolutize(path: &Path) -> Result<PathBuf> {
 fn update_cargo_config(
     cwd: &Path,
     sysroot_dir: &Path,
+    bin_dir: &Path,
     rust_target: &str,
     linker: &str,
-    arch: &str,
+    cc: &str,
+    cxx: &str,
+    cflags: &[String],
+    cxxflags: &[String],
 ) -> Result<()> {
     let cargo_dir = cwd.join(".cargo");
     fs::create_dir_all(&cargo_dir)?;
-    let wrapper_paths = create_toolchain_wrappers(sysroot_dir, linker, arch)?;
+    let wrapper_paths = create_toolchain_wrappers(bin_dir, sysroot_dir, cc, cxx, cflags, cxxflags)?;
 
     let config_path = cargo_dir.join("config.toml");
     let current = if config_path.exists() {
@@ -603,8 +633,8 @@ fn update_cargo_config(
     let rel_sysroot = rel_sysroot.to_string_lossy().to_string();
     let sysroot_arg = format!("link-arg=--sysroot={rel_sysroot}");
     let updated = upsert_target_section(&current, rust_target, linker, &sysroot_arg);
-    let cc_value = relative_path(&cargo_dir, &wrapper_paths.cc)?;
-    let cxx_value = relative_path(&cargo_dir, &wrapper_paths.cxx)?;
+    let cc_value = relative_path(cwd, &wrapper_paths.cc)?;
+    let cxx_value = relative_path(cwd, &wrapper_paths.cxx)?;
     let updated = upsert_env_section(
         &updated,
         rust_target,
@@ -620,40 +650,40 @@ struct WrapperPaths {
     cxx: PathBuf,
 }
 
-fn create_toolchain_wrappers(sysroot_dir: &Path, linker: &str, arch: &str) -> Result<WrapperPaths> {
-    let bundle_dir = sysroot_dir.parent().ok_or_else(|| {
-        Error::Message(format!(
-            "sysroot の親ディレクトリが取得できません: {}",
-            sysroot_dir.display()
-        ))
-    })?;
-    let wrapper_dir = bundle_dir.join("bin");
-    fs::create_dir_all(&wrapper_dir)?;
+fn create_toolchain_wrappers(
+    bin_dir: &Path,
+    sysroot_dir: &Path,
+    cc: &str,
+    cxx: &str,
+    cflags: &[String],
+    cxxflags: &[String],
+) -> Result<WrapperPaths> {
+    fs::create_dir_all(bin_dir)?;
 
-    let rel_target_from_script = relative_path(&wrapper_dir, bundle_dir)?;
-    let rel_target_from_script = rel_target_from_script.to_string_lossy();
+    let rel_sysroot_from_bin = relative_path(bin_dir, sysroot_dir)?;
+    let rel_sysroot_from_bin = rel_sysroot_from_bin.to_string_lossy();
     let script_common = format!(
-        "SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nTARGET_DIR=\"$(cd \"$SCRIPT_DIR/{rel_target}\" && pwd)\"\nSYSROOT=\"$TARGET_DIR/sysroot\"\n",
-        rel_target = rel_target_from_script
+        "SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nSYSROOT=\"$(cd \"$SCRIPT_DIR/{rel_sysroot}\" && pwd)\"\n",
+        rel_sysroot = rel_sysroot_from_bin
     );
 
-    let cxx = infer_cxx_compiler(linker);
-    let script_stem = wrapper_script_stem(linker);
-    let cxx_script_stem = wrapper_script_stem(&cxx);
-    let include_subdir = infer_include_subdir(linker, arch);
-    let include_dir = format!("$SYSROOT/usr/include/{include_subdir}");
+    let script_stem = wrapper_script_stem(cc);
+    let cxx_script_stem = wrapper_script_stem(cxx);
 
-    let cc_path = wrapper_dir.join(format!("{script_stem}-with-sysroot.sh"));
-    let cxx_path = wrapper_dir.join(format!("{cxx_script_stem}-with-sysroot.sh"));
+    let cc_path = bin_dir.join(format!("{script_stem}-with-sysroot.sh"));
+    let cxx_path = bin_dir.join(format!("{cxx_script_stem}-with-sysroot.sh"));
+    let cflags_arg = render_flags_args(cflags);
+    let cxxflags_arg = render_flags_args(cxxflags);
 
     let cc_script = format!(
-        "#!/usr/bin/env bash\nset -eu\n{script_common}\nexec {cc} --sysroot=\"$SYSROOT\" -isystem \"{include_dir}\" -isystem \"$SYSROOT/usr/include\" \"$@\"\n",
-        cc = linker,
-        include_dir = include_dir
+        "#!/usr/bin/env bash\nset -eu\n{script_common}\nexec {cc} --sysroot=\"$SYSROOT\"{cflags_arg} \"$@\"\n",
+        cc = cc,
+        cflags_arg = cflags_arg
     );
     let cxx_script = format!(
-        "#!/usr/bin/env bash\nset -eu\n{script_common}\nexec {cxx} --sysroot=\"$SYSROOT\" \"$@\"\n",
-        cxx = cxx
+        "#!/usr/bin/env bash\nset -eu\n{script_common}\nexec {cxx} --sysroot=\"$SYSROOT\"{cxxflags_arg} \"$@\"\n",
+        cxx = cxx,
+        cxxflags_arg = cxxflags_arg
     );
 
     atomic_write(&cc_path, &cc_script)?;
@@ -669,31 +699,19 @@ fn create_toolchain_wrappers(sysroot_dir: &Path, linker: &str, arch: &str) -> Re
     })
 }
 
-fn infer_cxx_compiler(linker: &str) -> String {
-    if let Some(prefix) = linker.strip_suffix("gcc") {
-        return format!("{prefix}g++");
-    }
-    if let Some(prefix) = linker.strip_suffix("clang") {
-        return format!("{prefix}clang++");
-    }
-    linker.to_string()
-}
-
-fn infer_include_subdir(linker: &str, arch: &str) -> String {
-    if let Some(prefix) = linker.strip_suffix("-gcc")
-        && !prefix.is_empty()
-    {
-        return prefix.to_string();
-    }
-    arch.to_string()
-}
-
 fn wrapper_script_stem(compiler: &str) -> String {
     Path::new(compiler)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(compiler)
         .to_string()
+}
+
+fn render_flags_args(flags: &[String]) -> String {
+    if flags.is_empty() {
+        return String::new();
+    }
+    format!(" {}", flags.join(" "))
 }
 
 #[cfg(unix)]
@@ -717,7 +735,8 @@ fn upsert_target_section(
     linker: &str,
     sysroot_arg: &str,
 ) -> String {
-    let mut lines: Vec<String> = input.lines().map(ToOwned::to_owned).collect();
+    let normalized = normalize_newlines(input);
+    let mut lines: Vec<String> = normalized.lines().map(ToOwned::to_owned).collect();
 
     let section_name = format!("target.{rust_target}");
     let section_name = section_name.as_str();
@@ -774,7 +793,8 @@ fn upsert_target_section(
 }
 
 fn upsert_env_section(input: &str, rust_target: &str, cc_value: &str, cxx_value: &str) -> String {
-    let mut lines: Vec<String> = input.lines().map(ToOwned::to_owned).collect();
+    let normalized = normalize_newlines(input);
+    let mut lines: Vec<String> = normalized.lines().map(ToOwned::to_owned).collect();
 
     let section_name = "env";
     let section_header = format!("[{section_name}]");
@@ -847,6 +867,10 @@ fn upsert_env_section(input: &str, rust_target: &str, cc_value: &str, cxx_value:
 fn toml_escape_basic_string(value: &str) -> String {
     let value = value.replace('\\', "\\\\");
     value.replace('"', "\\\"")
+}
+
+fn normalize_newlines(input: &str) -> String {
+    input.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn rewrite_section_body<F>(
@@ -987,6 +1011,7 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_config_json() -> &'static str {
@@ -995,6 +1020,10 @@ mod tests {
   "arch": "arm64",
   "rust_target": "aarch64-unknown-linux-gnu",
   "linker": "aarch64-linux-gnu-gcc",
+  "cc": "aarch64-linux-gnu-gcc",
+  "cxx": "aarch64-linux-gnu-g++",
+  "cflags": ["-isystem", "$SYSROOT/usr/include/aarch64-linux-gnu", "-isystem", "$SYSROOT/usr/include"],
+  "cxxflags": [],
   "packages": ["libc6-dev", "libstdc++-13-dev"],
   "repos": [
     {
@@ -1030,6 +1059,18 @@ mod tests {
         assert_eq!(config.arch, "arm64");
         assert_eq!(config.rust_target, "aarch64-unknown-linux-gnu");
         assert_eq!(config.linker, "aarch64-linux-gnu-gcc");
+        assert_eq!(config.cc, "aarch64-linux-gnu-gcc");
+        assert_eq!(config.cxx, "aarch64-linux-gnu-g++");
+        assert_eq!(
+            config.cflags,
+            vec![
+                "-isystem",
+                "$SYSROOT/usr/include/aarch64-linux-gnu",
+                "-isystem",
+                "$SYSROOT/usr/include"
+            ]
+        );
+        assert!(config.cxxflags.is_empty());
         assert_eq!(config.packages, vec!["libc6-dev", "libstdc++-13-dev"]);
         assert_eq!(config.repos.len(), 1);
         let repo = &config.repos[0];
@@ -1054,6 +1095,10 @@ mod tests {
   "arch": "arm64",
   "rust_target": "aarch64-unknown-linux-gnu",
   "linker": "aarch64-linux-gnu-gcc",
+  "cc": "aarch64-linux-gnu-gcc",
+  "cxx": "aarch64-linux-gnu-g++",
+  "cflags": [],
+  "cxxflags": [],
   "packages": [],
   "repos": [
     {
@@ -1073,6 +1118,10 @@ mod tests {
   "arch": "arm64",
   "rust_target": "aarch64-unknown-linux-gnu",
   "linker": "aarch64-linux-gnu-gcc",
+  "cc": "aarch64-linux-gnu-gcc",
+  "cxx": "aarch64-linux-gnu-g++",
+  "cflags": [],
+  "cxxflags": [],
   "packages": ["libc6-dev"],
   "repos": []
 }"#;
@@ -1086,6 +1135,10 @@ mod tests {
   "arch": "arm64",
   "rust_target": "aarch64-unknown-linux-gnu",
   "linker": "aarch64-linux-gnu-gcc",
+  "cc": "aarch64-linux-gnu-gcc",
+  "cxx": "aarch64-linux-gnu-g++",
+  "cflags": [],
+  "cxxflags": [],
   "packages": ["libc6-dev"],
   "repos": [
     {
@@ -1102,6 +1155,29 @@ mod tests {
         let config = sample_config_json().replace("\"arm64\"", "\"x86_64\"");
         let config = parse_sysroot_config_text(&config).expect("parse config");
         assert_eq!(config.arch, "x86_64");
+    }
+
+    #[test]
+    fn parse_sysroot_config_missing_cxx() {
+        let config = sample_config_json().replace("  \"cxx\": \"aarch64-linux-gnu-g++\",\n", "");
+        assert!(parse_sysroot_config_text(&config).is_err());
+    }
+
+    #[test]
+    fn parse_sysroot_config_missing_cc() {
+        let config = sample_config_json().replace("  \"cc\": \"aarch64-linux-gnu-gcc\",\n", "");
+        assert!(parse_sysroot_config_text(&config).is_err());
+    }
+
+    #[test]
+    fn parse_sysroot_config_missing_flags() {
+        let config = sample_config_json()
+            .replace(
+                "  \"cflags\": [\"-isystem\", \"$SYSROOT/usr/include/aarch64-linux-gnu\", \"-isystem\", \"$SYSROOT/usr/include\"],\n",
+                "",
+            )
+            .replace("  \"cxxflags\": [],\n", "");
+        assert!(parse_sysroot_config_text(&config).is_err());
     }
 
     #[test]
@@ -1312,14 +1388,24 @@ linker = "aarch64-linux-gnu-gcc"
             .as_nanos();
         let root = std::env::temp_dir().join(format!("shiguredo-sysroot-test-{unique}"));
         let sysroot = root.join("target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot");
+        let bin_dir = root.join("target/shiguredo-sysroot/ubuntu-24.04_armv8/bin");
         fs::create_dir_all(&sysroot).expect("create sysroot dir");
 
         update_cargo_config(
             &root,
             &sysroot,
+            &bin_dir,
             "aarch64-unknown-linux-gnu",
             "aarch64-linux-gnu-gcc",
-            "arm64",
+            "aarch64-linux-gnu-gcc",
+            "aarch64-linux-gnu-g++",
+            &[
+                "-isystem".to_string(),
+                "$SYSROOT/usr/include/aarch64-linux-gnu".to_string(),
+                "-isystem".to_string(),
+                "$SYSROOT/usr/include".to_string(),
+            ],
+            &[],
         )
         .expect("update config");
 
@@ -1343,9 +1429,8 @@ linker = "aarch64-linux-gnu-gcc"
         assert!(cc_wrapper.exists());
         assert!(cxx_wrapper.exists());
 
-        let cargo_dir = root.join(".cargo");
-        let cc_rel = relative_path(&cargo_dir, &cc_wrapper).expect("relative cc wrapper path");
-        let cxx_rel = relative_path(&cargo_dir, &cxx_wrapper).expect("relative cxx wrapper path");
+        let cc_rel = relative_path(&root, &cc_wrapper).expect("relative cc wrapper path");
+        let cxx_rel = relative_path(&root, &cxx_wrapper).expect("relative cxx wrapper path");
         let cc_line = format!(
             "CC_aarch64_unknown_linux_gnu = {{ value = \"{}\", relative = true }}",
             toml_escape_basic_string(&cc_rel.to_string_lossy())
@@ -1359,7 +1444,7 @@ linker = "aarch64-linux-gnu-gcc"
 
         let cc_script = fs::read_to_string(&cc_wrapper).expect("read cc wrapper");
         assert!(cc_script.contains("exec aarch64-linux-gnu-gcc --sysroot=\"$SYSROOT\""));
-        assert!(cc_script.contains("-isystem \"$SYSROOT/usr/include/aarch64-linux-gnu\""));
+        assert!(cc_script.contains("-isystem $SYSROOT/usr/include/aarch64-linux-gnu"));
 
         let cxx_script = fs::read_to_string(&cxx_wrapper).expect("read cxx wrapper");
         assert!(cxx_script.contains("exec aarch64-linux-gnu-g++ --sysroot=\"$SYSROOT\""));
@@ -1405,5 +1490,24 @@ linker = "aarch64-linux-gnu-gcc"
         ];
         let normalized = normalize_argv_for_noargs(argv.clone());
         assert_eq!(normalized, argv);
+    }
+
+    proptest! {
+        #[test]
+        fn upsert_target_section_is_idempotent_for_any_input(input in ".*") {
+            let once = upsert_target_section(
+                &input,
+                "aarch64-unknown-linux-gnu",
+                "aarch64-linux-gnu-gcc",
+                "link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot",
+            );
+            let twice = upsert_target_section(
+                &once,
+                "aarch64-unknown-linux-gnu",
+                "aarch64-linux-gnu-gcc",
+                "link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot",
+            );
+            prop_assert_eq!(once, twice);
+        }
     }
 }
