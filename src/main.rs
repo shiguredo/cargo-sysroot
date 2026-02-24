@@ -180,17 +180,7 @@ fn run() -> Result<()> {
     build_sysroot(&config, &config.arch, &sysroot_dir, &workbase)?;
 
     let cwd = std::env::current_dir()?;
-    update_cargo_config(
-        &cwd,
-        &sysroot_dir,
-        &bin_dir,
-        &config.rust_target,
-        &config.linker,
-        &config.cc,
-        &config.cxx,
-        &config.cflags,
-        &config.cxxflags,
-    )?;
+    update_cargo_config(&cwd, &sysroot_dir, &bin_dir, &config)?;
 
     println!("Done.");
     println!("Target directory : {}", target_dir.display());
@@ -611,16 +601,18 @@ fn update_cargo_config(
     cwd: &Path,
     sysroot_dir: &Path,
     bin_dir: &Path,
-    rust_target: &str,
-    linker: &str,
-    cc: &str,
-    cxx: &str,
-    cflags: &[String],
-    cxxflags: &[String],
+    config: &SysrootConfig,
 ) -> Result<()> {
     let cargo_dir = cwd.join(".cargo");
     fs::create_dir_all(&cargo_dir)?;
-    let wrapper_paths = create_toolchain_wrappers(bin_dir, sysroot_dir, cc, cxx, cflags, cxxflags)?;
+    let wrapper_paths = create_toolchain_wrappers(
+        bin_dir,
+        sysroot_dir,
+        &config.cc,
+        &config.cxx,
+        &config.cflags,
+        &config.cxxflags,
+    )?;
 
     let config_path = cargo_dir.join("config.toml");
     let current = if config_path.exists() {
@@ -632,12 +624,13 @@ fn update_cargo_config(
     let rel_sysroot = relative_path(cwd, sysroot_dir)?;
     let rel_sysroot = rel_sysroot.to_string_lossy().to_string();
     let sysroot_arg = format!("link-arg=--sysroot={rel_sysroot}");
-    let updated = upsert_target_section(&current, rust_target, linker, &sysroot_arg);
+    let updated =
+        upsert_target_section(&current, &config.rust_target, &config.linker, &sysroot_arg);
     let cc_value = relative_path(cwd, &wrapper_paths.cc)?;
     let cxx_value = relative_path(cwd, &wrapper_paths.cxx)?;
     let updated = upsert_env_section(
         &updated,
-        rust_target,
+        &config.rust_target,
         &cc_value.to_string_lossy(),
         &cxx_value.to_string_lossy(),
     );
@@ -1389,25 +1382,10 @@ linker = "aarch64-linux-gnu-gcc"
         let root = std::env::temp_dir().join(format!("shiguredo-sysroot-test-{unique}"));
         let sysroot = root.join("target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot");
         let bin_dir = root.join("target/shiguredo-sysroot/ubuntu-24.04_armv8/bin");
+        let test_config = parse_sysroot_config_text(sample_config_json()).expect("parse config");
         fs::create_dir_all(&sysroot).expect("create sysroot dir");
 
-        update_cargo_config(
-            &root,
-            &sysroot,
-            &bin_dir,
-            "aarch64-unknown-linux-gnu",
-            "aarch64-linux-gnu-gcc",
-            "aarch64-linux-gnu-gcc",
-            "aarch64-linux-gnu-g++",
-            &[
-                "-isystem".to_string(),
-                "$SYSROOT/usr/include/aarch64-linux-gnu".to_string(),
-                "-isystem".to_string(),
-                "$SYSROOT/usr/include".to_string(),
-            ],
-            &[],
-        )
-        .expect("update config");
+        update_cargo_config(&root, &sysroot, &bin_dir, &test_config).expect("update config");
 
         let config = fs::read_to_string(root.join(".cargo/config.toml")).expect("read config");
         assert!(config.contains("[target.aarch64-unknown-linux-gnu]"));
