@@ -1,0 +1,19 @@
+[package]
+name = "shiguredo_sysroot"
+version = "2026.0.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Shiguredo Inc."]
+license = "Apache-2.0"
+description = "cargo subcommand for generating cross compile sysroot"
+homepage = "https://github.com/shiguredo/cargo-sysroot"
+repository = "https://github.com/shiguredo/cargo-sysroot"
+readme = "README.md"
+
+[[bin]]
+name = "cargo-shiguredo-sysroot"
+path = "src/main.rs"
+
+[dependencies]
+noargs = "0.4.2"
+nojson = "0.3.6"
