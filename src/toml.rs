@@ -1,5 +1,5 @@
 use crate::{Result};
-use shiguredo_toml::{Document as TomlDocument, Value as TomlValue};
+use shiguredo_toml::{Document, Value};
 
 pub(crate) fn rewrite_cargo_config_toml(
     input: &str,
@@ -9,17 +9,17 @@ pub(crate) fn rewrite_cargo_config_toml(
     cc_value: &str,
     cxx_value: &str,
 ) -> Result<String> {
-    let mut doc = TomlDocument::parse(input)?;
+    let mut doc = Document::parse(input)?;
     let target_prefix = format!("target.{rust_target}");
     doc.set_path(
         &format!("{target_prefix}.linker"),
-        TomlValue::String(linker.to_string()),
+        Value::String(linker.to_string()),
     )?;
     doc.set_path(
         &format!("{target_prefix}.rustflags"),
-        TomlValue::Array(vec![
-            TomlValue::String("-C".to_string()),
-            TomlValue::String(sysroot_arg.to_string()),
+        Value::Array(vec![
+            Value::String("-C".to_string()),
+            Value::String(sysroot_arg.to_string()),
         ]),
     )?;
 
@@ -39,11 +39,11 @@ pub(crate) fn rewrite_cargo_config_toml(
     Ok(doc.as_str().to_string())
 }
 
-fn relative_env_value(value: &str) -> TomlValue {
+fn relative_env_value(value: &str) -> Value {
     let mut table = shiguredo_toml::Table::new();
-    table.insert("relative".to_string(), TomlValue::Boolean(true));
-    table.insert("value".to_string(), TomlValue::String(value.to_string()));
-    TomlValue::Table(table)
+    table.insert("relative".to_string(), Value::Boolean(true));
+    table.insert("value".to_string(), Value::String(value.to_string()));
+    Value::Table(table)
 }
 
 #[cfg(test)]
