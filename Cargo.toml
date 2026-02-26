@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 noargs = "0.4.2"
 nojson = "0.3.6"
+shiguredo_toml = { path = "crates/toml-rs" }
 
 [dev-dependencies]
 proptest = "1"

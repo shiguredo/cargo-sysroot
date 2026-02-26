@@ -394,7 +394,12 @@ dependencies = [
  "noargs",
  "nojson",
  "proptest",
+ "shiguredo_toml",
 ]
+
+[[package]]
+name = "shiguredo_toml"
+version = "2026.1.0-canary.6"
 
 [[package]]
 name = "syn"
