@@ -1,4 +1,4 @@
-use crate::{Result};
+use crate::Result;
 use shiguredo_toml::{Document, Value};
 
 pub(crate) fn rewrite_cargo_config_toml(
@@ -27,14 +27,8 @@ pub(crate) fn rewrite_cargo_config_toml(
     let cc_key = format!("CC_{target_key}");
     let cxx_key = format!("CXX_{target_key}");
 
-    doc.set_path(
-        &format!("env.{cc_key}"),
-        relative_env_value(cc_value),
-    )?;
-    doc.set_path(
-        &format!("env.{cxx_key}"),
-        relative_env_value(cxx_value),
-    )?;
+    doc.set_path(&format!("env.{cc_key}"), relative_env_value(cc_value))?;
+    doc.set_path(&format!("env.{cxx_key}"), relative_env_value(cxx_value))?;
 
     Ok(doc.as_str().to_string())
 }
