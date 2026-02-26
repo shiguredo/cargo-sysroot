@@ -8,12 +8,17 @@ use std::process::{Command, ExitCode};
 
 use nojson::RawJson;
 
+mod toml;
+
+use toml::rewrite_cargo_config_toml;
+
 #[derive(Debug)]
 enum Error {
     Io(std::io::Error),
     Utf8(std::string::FromUtf8Error),
     Args(noargs::Error),
     Json(nojson::JsonParseError),
+    Toml(shiguredo_toml::Error),
     Message(String),
 }
 
@@ -24,6 +29,7 @@ impl fmt::Display for Error {
             Self::Utf8(e) => write!(f, "UTF-8 エラー: {e}"),
             Self::Args(e) => write!(f, "引数エラー: {e:?}"),
             Self::Json(e) => write!(f, "JSON 解析エラー: {e}"),
+            Self::Toml(e) => write!(f, "TOML エラー: {e}"),
             Self::Message(msg) => f.write_str(msg),
         }
     }
@@ -50,6 +56,12 @@ impl From<noargs::Error> for Error {
 impl From<nojson::JsonParseError> for Error {
     fn from(value: nojson::JsonParseError) -> Self {
         Self::Json(value)
+    }
+}
+
+impl From<shiguredo_toml::Error> for Error {
+    fn from(value: shiguredo_toml::Error) -> Self {
+        Self::Toml(value)
     }
 }
 
@@ -624,16 +636,16 @@ fn update_cargo_config(
     let rel_sysroot = relative_path(cwd, sysroot_dir)?;
     let rel_sysroot = rel_sysroot.to_string_lossy().to_string();
     let sysroot_arg = format!("link-arg=--sysroot={rel_sysroot}");
-    let updated =
-        upsert_target_section(&current, &config.rust_target, &config.linker, &sysroot_arg);
     let cc_value = relative_path(cwd, &wrapper_paths.cc)?;
     let cxx_value = relative_path(cwd, &wrapper_paths.cxx)?;
-    let updated = upsert_env_section(
-        &updated,
+    let updated = rewrite_cargo_config_toml(
+        &current,
         &config.rust_target,
+        &config.linker,
+        &sysroot_arg,
         &cc_value.to_string_lossy(),
         &cxx_value.to_string_lossy(),
-    );
+    )?;
     atomic_write(&config_path, &updated)
 }
 
@@ -722,260 +734,6 @@ fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn upsert_target_section(
-    input: &str,
-    rust_target: &str,
-    linker: &str,
-    sysroot_arg: &str,
-) -> String {
-    let normalized = normalize_newlines(input);
-    let mut lines: Vec<String> = normalized.lines().map(ToOwned::to_owned).collect();
-
-    let section_name = format!("target.{rust_target}");
-    let section_name = section_name.as_str();
-    let section_header = format!("[{section_name}]");
-
-    let target_start = lines
-        .iter()
-        .enumerate()
-        .find_map(|(i, line)| (parse_section_name(line) == Some(section_name)).then_some(i));
-
-    let linker_line = format!("linker = \"{}\"", toml_escape_basic_string(linker));
-    let rustflags_line = format!(
-        "rustflags = [\"-C\", \"{}\"]",
-        toml_escape_basic_string(sysroot_arg)
-    );
-
-    match target_start {
-        Some(start) => {
-            let end = lines
-                .iter()
-                .enumerate()
-                .skip(start + 1)
-                .find_map(|(i, line)| parse_section_name(line).map(|_| i))
-                .unwrap_or(lines.len());
-
-            let replacement_lines = vec![linker_line, rustflags_line];
-            let section_lines = rewrite_section_body(
-                &lines,
-                start,
-                end,
-                |line| is_key_line(line, "linker") || is_key_line(line, "rustflags"),
-                &replacement_lines,
-            );
-
-            let mut merged = Vec::new();
-            merged.extend_from_slice(&lines[..=start]);
-            merged.extend(section_lines);
-            merged.extend_from_slice(&lines[end..]);
-            lines = merged;
-        }
-        None => {
-            if !lines.is_empty() && !lines.last().is_some_and(|l| l.trim().is_empty()) {
-                lines.push(String::new());
-            }
-            lines.push(section_header);
-            lines.push(linker_line);
-            lines.push(rustflags_line);
-        }
-    }
-
-    let mut output = lines.join("\n");
-    output.push('\n');
-    output
-}
-
-fn upsert_env_section(input: &str, rust_target: &str, cc_value: &str, cxx_value: &str) -> String {
-    let normalized = normalize_newlines(input);
-    let mut lines: Vec<String> = normalized.lines().map(ToOwned::to_owned).collect();
-
-    let section_name = "env";
-    let section_header = format!("[{section_name}]");
-    let env_start = lines
-        .iter()
-        .enumerate()
-        .find_map(|(i, line)| (parse_section_name(line) == Some(section_name)).then_some(i));
-
-    let target_key = rust_target.replace('-', "_");
-    let cc_key = format!("CC_{target_key}");
-    let cxx_key = format!("CXX_{target_key}");
-    let cflags_key = format!("CFLAGS_{target_key}");
-    let cxxflags_key = format!("CXXFLAGS_{target_key}");
-
-    let cc_line = format!(
-        "{} = {{ value = \"{}\", relative = true }}",
-        cc_key,
-        toml_escape_basic_string(cc_value)
-    );
-    let cxx_line = format!(
-        "{} = {{ value = \"{}\", relative = true }}",
-        cxx_key,
-        toml_escape_basic_string(cxx_value)
-    );
-
-    match env_start {
-        Some(start) => {
-            let end = lines
-                .iter()
-                .enumerate()
-                .skip(start + 1)
-                .find_map(|(i, line)| parse_section_name(line).map(|_| i))
-                .unwrap_or(lines.len());
-
-            let replacement_lines = vec![cc_line, cxx_line];
-            let section_lines = rewrite_section_body(
-                &lines,
-                start,
-                end,
-                |line| {
-                    is_key_line(line, &cc_key)
-                        || is_key_line(line, &cxx_key)
-                        || is_key_line(line, &cflags_key)
-                        || is_key_line(line, &cxxflags_key)
-                },
-                &replacement_lines,
-            );
-
-            let mut merged = Vec::new();
-            merged.extend_from_slice(&lines[..=start]);
-            merged.extend(section_lines);
-            merged.extend_from_slice(&lines[end..]);
-            lines = merged;
-        }
-        None => {
-            if !lines.is_empty() && !lines.last().is_some_and(|l| l.trim().is_empty()) {
-                lines.push(String::new());
-            }
-            lines.push(section_header);
-            lines.push(cc_line);
-            lines.push(cxx_line);
-        }
-    }
-
-    let mut output = lines.join("\n");
-    output.push('\n');
-    output
-}
-
-fn toml_escape_basic_string(value: &str) -> String {
-    let value = value.replace('\\', "\\\\");
-    value.replace('"', "\\\"")
-}
-
-fn normalize_newlines(input: &str) -> String {
-    input.replace("\r\n", "\n").replace('\r', "\n")
-}
-
-fn rewrite_section_body<F>(
-    lines: &[String],
-    start: usize,
-    end: usize,
-    mut should_replace: F,
-    replacements: &[String],
-) -> Vec<String>
-where
-    F: FnMut(&str) -> bool,
-{
-    let mut out = Vec::new();
-    let mut insert_at: Option<usize> = None;
-    let mut i = start + 1;
-    while i < end {
-        let line = &lines[i];
-        if should_replace(line) {
-            if insert_at.is_none() {
-                insert_at = Some(out.len());
-            }
-            i = skip_key_value_block(lines, i, end);
-            continue;
-        }
-        out.push(line.clone());
-        i += 1;
-    }
-
-    let at = insert_at.unwrap_or(out.len());
-    out.splice(at..at, replacements.iter().cloned());
-    out
-}
-
-fn skip_key_value_block(lines: &[String], start: usize, end: usize) -> usize {
-    let line = &lines[start];
-    let Some((_, rhs)) = line.split_once('=') else {
-        return start + 1;
-    };
-
-    let mut depth = update_array_depth(0, rhs);
-    let mut i = start + 1;
-    while i < end && depth > 0 {
-        depth = update_array_depth(depth, &lines[i]);
-        i += 1;
-    }
-    i
-}
-
-fn update_array_depth(mut depth: i32, text: &str) -> i32 {
-    let mut in_basic = false;
-    let mut in_literal = false;
-    let mut escaped = false;
-
-    for ch in text.chars() {
-        if in_basic {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == '"' {
-                in_basic = false;
-            }
-            continue;
-        }
-
-        if in_literal {
-            if ch == '\'' {
-                in_literal = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => in_basic = true,
-            '\'' => in_literal = true,
-            '#' => break,
-            '[' => depth += 1,
-            ']' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    depth
-}
-
-fn parse_section_name(line: &str) -> Option<&str> {
-    let trimmed = line.trim();
-    if !trimmed.starts_with('[') || !trimmed.ends_with(']') || trimmed.starts_with("[[") {
-        return None;
-    }
-    Some(&trimmed[1..trimmed.len() - 1])
-}
-
-fn is_key_line(line: &str, key: &str) -> bool {
-    let trimmed = line.trim_start();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
-        return false;
-    }
-    let Some((lhs, _)) = trimmed.split_once('=') else {
-        return false;
-    };
-    lhs.trim() == key
-}
-
 fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         Error::Message(format!(
@@ -1004,7 +762,7 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
+    use shiguredo_toml::Value as TomlValue;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_config_json() -> &'static str {
@@ -1173,192 +931,8 @@ mod tests {
         assert!(parse_sysroot_config_text(&config).is_err());
     }
 
-    #[test]
-    fn upsert_target_section_create() {
-        let output = upsert_target_section(
-            "",
-            "aarch64-unknown-linux-gnu",
-            "aarch64-linux-gnu-gcc",
-            "link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot",
-        );
-        assert!(output.contains("[target.aarch64-unknown-linux-gnu]"));
-        assert!(output.contains("linker = \"aarch64-linux-gnu-gcc\""));
-        assert!(output.contains(
-            "rustflags = [\"-C\", \"link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot\"]"
-        ));
-    }
-
-    #[test]
-    fn upsert_target_section_update_keep_other_keys() {
-        let input = r#"[target.aarch64-unknown-linux-gnu]
-linker = "old"
-rustflags = ["-C", "old"]
-foo = "bar"
-
-[env]
-A = "B"
-"#;
-        let output = upsert_target_section(
-            input,
-            "aarch64-unknown-linux-gnu",
-            "aarch64-linux-gnu-gcc",
-            "link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot",
-        );
-        assert!(output.contains("foo = \"bar\""));
-        assert!(output.contains("[env]"));
-        assert!(!output.contains("linker = \"old\""));
-        assert!(!output.contains("\"old\""));
-    }
-
-    #[test]
-    fn upsert_target_section_update_multiline_rustflags() {
-        let input = r#"[target.aarch64-unknown-linux-gnu]
-rustflags = [
-  "-C",
-  "link-arg=--sysroot=old",
-]
-foo = "bar"
-"#;
-        let output = upsert_target_section(
-            input,
-            "aarch64-unknown-linux-gnu",
-            "aarch64-linux-gnu-gcc",
-            "link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot",
-        );
-        assert!(output.contains("foo = \"bar\""));
-        assert!(output.contains(
-            "rustflags = [\"-C\", \"link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot\"]"
-        ));
-        assert!(!output.contains("link-arg=--sysroot=old"));
-        assert!(!output.contains("  \"-C\","));
-    }
-
-    #[test]
-    fn upsert_target_section_preserve_expected_blank_lines() {
-        let input = r#"[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
-rustflags = ["-C", "link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot"]
-
-[env]
-"#;
-        let output = upsert_target_section(
-            input,
-            "aarch64-unknown-linux-gnu",
-            "aarch64-linux-gnu-gcc",
-            "link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot",
-        );
-        assert!(output.contains(
-            "[target.aarch64-unknown-linux-gnu]\nlinker = \"aarch64-linux-gnu-gcc\"\nrustflags = [\"-C\", \"link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot\"]\n\n[env]\n"
-        ));
-        assert!(!output.contains("[target.aarch64-unknown-linux-gnu]\n\nlinker"));
-    }
-
-    #[test]
-    fn upsert_target_then_env_section_keep_multiline_input_consistent() {
-        let input = r#"[target.aarch64-unknown-linux-gnu]
-rustflags = [
-  "-C",
-  "link-arg=--sysroot=old",
-]
-
-[env]
-FOO = "BAR"
-"#;
-        let updated = upsert_target_section(
-            input,
-            "aarch64-unknown-linux-gnu",
-            "aarch64-linux-gnu-gcc",
-            "link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot",
-        );
-        let updated = upsert_env_section(
-            &updated,
-            "aarch64-unknown-linux-gnu",
-            "../target/cc-wrapper.sh",
-            "../target/cxx-wrapper.sh",
-        );
-        assert!(updated.contains("[target.aarch64-unknown-linux-gnu]"));
-        assert!(updated.contains("[env]"));
-        assert!(updated.contains("FOO = \"BAR\""));
-        assert!(updated.contains(
-            "rustflags = [\"-C\", \"link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot\"]"
-        ));
-        assert!(!updated.contains("link-arg=--sysroot=old"));
-        assert_eq!(updated.matches("rustflags = ").count(), 1);
-    }
-
-    #[test]
-    fn upsert_target_section_idempotent() {
-        let once = upsert_target_section(
-            "",
-            "aarch64-unknown-linux-gnu",
-            "aarch64-linux-gnu-gcc",
-            "link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot",
-        );
-        let twice = upsert_target_section(
-            &once,
-            "aarch64-unknown-linux-gnu",
-            "aarch64-linux-gnu-gcc",
-            "link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot",
-        );
-        assert_eq!(once, twice);
-    }
-
-    #[test]
-    fn upsert_env_section_create() {
-        let output = upsert_env_section(
-            "",
-            "aarch64-unknown-linux-gnu",
-            "../target/cc-wrapper.sh",
-            "../target/cxx-wrapper.sh",
-        );
-        assert!(output.contains("[env]"));
-        assert!(
-            output.contains("CC_aarch64_unknown_linux_gnu = { value = \"../target/cc-wrapper.sh\", relative = true }")
-        );
-        assert!(
-            output.contains("CXX_aarch64_unknown_linux_gnu = { value = \"../target/cxx-wrapper.sh\", relative = true }")
-        );
-    }
-
-    #[test]
-    fn upsert_env_section_update_keep_other_keys() {
-        let input = r#"[env]
-FOO = "BAR"
-CC_aarch64_unknown_linux_gnu = "old-cc"
-CFLAGS_aarch64_unknown_linux_gnu = "old-cflags"
-
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
-"#;
-        let output = upsert_env_section(
-            input,
-            "aarch64-unknown-linux-gnu",
-            "../target/cc-wrapper.sh",
-            "../target/cxx-wrapper.sh",
-        );
-        assert!(output.contains("FOO = \"BAR\""));
-        assert!(output.contains("[target.aarch64-unknown-linux-gnu]"));
-        assert!(!output.contains("old-cc"));
-        assert!(!output.contains("old-cflags"));
-        assert!(output.contains("CC_aarch64_unknown_linux_gnu = { value = \"../target/cc-wrapper.sh\", relative = true }"));
-        assert!(output.contains("CXX_aarch64_unknown_linux_gnu = { value = \"../target/cxx-wrapper.sh\", relative = true }"));
-    }
-
-    #[test]
-    fn upsert_env_section_idempotent() {
-        let once = upsert_env_section(
-            "",
-            "aarch64-unknown-linux-gnu",
-            "../target/cc-wrapper.sh",
-            "../target/cxx-wrapper.sh",
-        );
-        let twice = upsert_env_section(
-            &once,
-            "aarch64-unknown-linux-gnu",
-            "../target/cc-wrapper.sh",
-            "../target/cxx-wrapper.sh",
-        );
-        assert_eq!(once, twice);
+    fn parse_toml_table(input: &str) -> shiguredo_toml::Table {
+        shiguredo_toml::from_str(input).expect("parse toml")
     }
 
     #[test]
@@ -1388,15 +962,25 @@ linker = "aarch64-linux-gnu-gcc"
         update_cargo_config(&root, &sysroot, &bin_dir, &test_config).expect("update config");
 
         let config = fs::read_to_string(root.join(".cargo/config.toml")).expect("read config");
-        assert!(config.contains("[target.aarch64-unknown-linux-gnu]"));
+        let parsed = parse_toml_table(&config);
 
         let rel_sysroot = relative_path(&root, &sysroot).expect("relative sysroot path");
         let sysroot_arg = format!("link-arg=--sysroot={}", rel_sysroot.to_string_lossy());
-        let rustflags_line = format!(
-            "rustflags = [\"-C\", \"{}\"]",
-            toml_escape_basic_string(&sysroot_arg)
+        let target = parsed
+            .get("target")
+            .and_then(TomlValue::as_table)
+            .expect("target table");
+        let target_cfg = target
+            .get("aarch64-unknown-linux-gnu")
+            .and_then(TomlValue::as_table)
+            .expect("target config");
+        assert_eq!(
+            target_cfg.get("rustflags"),
+            Some(&TomlValue::Array(vec![
+                TomlValue::String("-C".to_string()),
+                TomlValue::String(sysroot_arg.clone()),
+            ]))
         );
-        assert!(config.contains(&rustflags_line));
 
         let cc_wrapper = root.join(
             "target/shiguredo-sysroot/ubuntu-24.04_armv8/bin/aarch64-linux-gnu-gcc-with-sysroot.sh",
@@ -1409,16 +993,28 @@ linker = "aarch64-linux-gnu-gcc"
 
         let cc_rel = relative_path(&root, &cc_wrapper).expect("relative cc wrapper path");
         let cxx_rel = relative_path(&root, &cxx_wrapper).expect("relative cxx wrapper path");
-        let cc_line = format!(
-            "CC_aarch64_unknown_linux_gnu = {{ value = \"{}\", relative = true }}",
-            toml_escape_basic_string(&cc_rel.to_string_lossy())
+        let env = parsed
+            .get("env")
+            .and_then(TomlValue::as_table)
+            .expect("env table");
+        let cc = env
+            .get("CC_aarch64_unknown_linux_gnu")
+            .and_then(TomlValue::as_table)
+            .expect("cc entry");
+        let cxx = env
+            .get("CXX_aarch64_unknown_linux_gnu")
+            .and_then(TomlValue::as_table)
+            .expect("cxx entry");
+        assert_eq!(
+            cc.get("value").and_then(TomlValue::as_str),
+            Some(&*cc_rel.to_string_lossy())
         );
-        let cxx_line = format!(
-            "CXX_aarch64_unknown_linux_gnu = {{ value = \"{}\", relative = true }}",
-            toml_escape_basic_string(&cxx_rel.to_string_lossy())
+        assert_eq!(
+            cxx.get("value").and_then(TomlValue::as_str),
+            Some(&*cxx_rel.to_string_lossy())
         );
-        assert!(config.contains(&cc_line));
-        assert!(config.contains(&cxx_line));
+        assert_eq!(cc.get("relative").and_then(TomlValue::as_bool), Some(true));
+        assert_eq!(cxx.get("relative").and_then(TomlValue::as_bool), Some(true));
 
         let cc_script = fs::read_to_string(&cc_wrapper).expect("read cc wrapper");
         assert!(cc_script.contains("exec aarch64-linux-gnu-gcc --sysroot=\"$SYSROOT\""));
@@ -1468,24 +1064,5 @@ linker = "aarch64-linux-gnu-gcc"
         ];
         let normalized = normalize_argv_for_noargs(argv.clone());
         assert_eq!(normalized, argv);
-    }
-
-    proptest! {
-        #[test]
-        fn upsert_target_section_is_idempotent_for_any_input(input in ".*") {
-            let once = upsert_target_section(
-                &input,
-                "aarch64-unknown-linux-gnu",
-                "aarch64-linux-gnu-gcc",
-                "link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot",
-            );
-            let twice = upsert_target_section(
-                &once,
-                "aarch64-unknown-linux-gnu",
-                "aarch64-linux-gnu-gcc",
-                "link-arg=--sysroot=target/shiguredo-sysroot/ubuntu-24.04_armv8/sysroot",
-            );
-            prop_assert_eq!(once, twice);
-        }
     }
 }
