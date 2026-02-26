@@ -762,7 +762,7 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shiguredo_toml::Value as TomlValue;
+    use shiguredo_toml::Value;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_config_json() -> &'static str {
@@ -968,17 +968,17 @@ mod tests {
         let sysroot_arg = format!("link-arg=--sysroot={}", rel_sysroot.to_string_lossy());
         let target = parsed
             .get("target")
-            .and_then(TomlValue::as_table)
+            .and_then(Value::as_table)
             .expect("target table");
         let target_cfg = target
             .get("aarch64-unknown-linux-gnu")
-            .and_then(TomlValue::as_table)
+            .and_then(Value::as_table)
             .expect("target config");
         assert_eq!(
             target_cfg.get("rustflags"),
-            Some(&TomlValue::Array(vec![
-                TomlValue::String("-C".to_string()),
-                TomlValue::String(sysroot_arg.clone()),
+            Some(&Value::Array(vec![
+                Value::String("-C".to_string()),
+                Value::String(sysroot_arg.clone()),
             ]))
         );
 
@@ -995,26 +995,26 @@ mod tests {
         let cxx_rel = relative_path(&root, &cxx_wrapper).expect("relative cxx wrapper path");
         let env = parsed
             .get("env")
-            .and_then(TomlValue::as_table)
+            .and_then(Value::as_table)
             .expect("env table");
         let cc = env
             .get("CC_aarch64_unknown_linux_gnu")
-            .and_then(TomlValue::as_table)
+            .and_then(Value::as_table)
             .expect("cc entry");
         let cxx = env
             .get("CXX_aarch64_unknown_linux_gnu")
-            .and_then(TomlValue::as_table)
+            .and_then(Value::as_table)
             .expect("cxx entry");
         assert_eq!(
-            cc.get("value").and_then(TomlValue::as_str),
+            cc.get("value").and_then(Value::as_str),
             Some(&*cc_rel.to_string_lossy())
         );
         assert_eq!(
-            cxx.get("value").and_then(TomlValue::as_str),
+            cxx.get("value").and_then(Value::as_str),
             Some(&*cxx_rel.to_string_lossy())
         );
-        assert_eq!(cc.get("relative").and_then(TomlValue::as_bool), Some(true));
-        assert_eq!(cxx.get("relative").and_then(TomlValue::as_bool), Some(true));
+        assert_eq!(cc.get("relative").and_then(Value::as_bool), Some(true));
+        assert_eq!(cxx.get("relative").and_then(Value::as_bool), Some(true));
 
         let cc_script = fs::read_to_string(&cc_wrapper).expect("read cc wrapper");
         assert!(cc_script.contains("exec aarch64-linux-gnu-gcc --sysroot=\"$SYSROOT\""));
