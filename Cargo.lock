@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "shiguredo_sysroot"
-version = "2026.1.0-canary.0"
+version = "2026.1.0-canary.1"
 dependencies = [
  "noargs",
  "nojson",
