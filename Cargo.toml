@@ -1,6 +1,6 @@
 [package]
 name = "shiguredo_sysroot"
-version = "2026.1.0-canary.1"
+version = "2026.1.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Shiguredo Inc."]
@@ -15,8 +15,8 @@ name = "cargo-shiguredo-sysroot"
 path = "src/main.rs"
 
 [dependencies]
-noargs = "0.4.2"
-nojson = "0.3.6"
+noargs = "0.4"
+nojson = "0.3"
 shiguredo_toml = "2026.1.0"
 
 [dev-dependencies]
